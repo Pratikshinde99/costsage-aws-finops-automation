@@ -421,10 +421,10 @@ Possible improvements include:
 Pratik Shinde
 
 GitHub
-https://github.com/<your-username>
+https://github.com/Pratikshinde99
 
 LinkedIn
-https://www.linkedin.com/in/<your-linkedin-id>
+https://www.linkedin.com/in/pratik-shinde-a95a23222/
 
 ---
 
