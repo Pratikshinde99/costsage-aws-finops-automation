@@ -1,0 +1,17 @@
+ReportBucketName=costsage-prod-dashboardbucket-lracj9qaueom
+ReportPrefix=daily
+DDBTableName=CostTrends
+SnsTopicArn=arn:aws:sns:us-east-1:534278687235:CostSageAlerts
+SlackWebhookSecretName=costsage/prod/slack-webhook
+ScheduleExpression=cron(0 9 * * ? *)
+IncludeElbCheck=true
+RequiredTags=Owner,Project,Environment
+AnomalyMultiplier=1.30
+MissingTagsAlertThreshold=5
+PotentialSavingsAlertThreshold=100.0
+MonthlyBudgetUsd=0.0
+BudgetAlertThresholdPct=80.0
+Ec2DefaultHourlyUsd=0.05
+EbsGp3GbMonthUsd=0.08
+SnapshotGbMonthUsd=0.05
+Ec2TypeHourlyOverrides=

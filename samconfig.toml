@@ -1,0 +1,36 @@
+version = 0.1
+
+[default]
+[default.build]
+[default.build.parameters]
+use_container = false
+cached = true
+parallel = true
+
+[default.validate]
+[default.validate.parameters]
+lint = true
+
+[dev]
+[dev.deploy]
+[dev.deploy.parameters]
+stack_name = "costsage-dev"
+resolve_s3 = true
+s3_prefix = "costsage-dev"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+fail_on_empty_changeset = false
+parameter_overrides = "ReportBucketName=your-dev-report-bucket ReportPrefix=daily DDBTableName=CostTrendsDev SnsTopicArn=arn:aws:sns:us-east-1:123456789012:CostSageAlertsDev SlackWebhookSecretName=costsage/dev/slack-webhook ScheduleExpression='cron(0 9 * * ? *)' IncludeElbCheck=true RequiredTags=Owner,Project,Environment AnomalyMultiplier=1.30 MissingTagsAlertThreshold=5 PotentialSavingsAlertThreshold=100.0 MonthlyBudgetUsd=0.0 BudgetAlertThresholdPct=80.0 Ec2DefaultHourlyUsd=0.05 EbsGp3GbMonthUsd=0.08 SnapshotGbMonthUsd=0.05 Ec2TypeHourlyOverrides="
+
+[prod]
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "costsage-prod"
+resolve_s3 = true
+s3_prefix = "costsage-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+fail_on_empty_changeset = false
+parameter_overrides = "ReportBucketName=costsage-prod-dashboardbucket-lracj9qaueom ReportPrefix=daily DDBTableName=CostTrends SnsTopicArn=arn:aws:sns:us-east-1:534278687235:CostSageAlerts SlackWebhookSecretName=costsage/prod/slack-webhook ScheduleExpression='cron(0 9 * * ? *)' IncludeElbCheck=true RequiredTags=Owner,Project,Environment AnomalyMultiplier=1.30 MissingTagsAlertThreshold=5 PotentialSavingsAlertThreshold=100.0 MonthlyBudgetUsd=0.0 BudgetAlertThresholdPct=80.0 Ec2DefaultHourlyUsd=0.05 EbsGp3GbMonthUsd=0.08 SnapshotGbMonthUsd=0.05 Ec2TypeHourlyOverrides="

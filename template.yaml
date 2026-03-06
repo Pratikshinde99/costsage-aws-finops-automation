@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CostSage AWS - Daily cost optimization and governance automation
+
+Parameters:
+  ReportBucketName:
+    Type: String
+    Description: S3 bucket to store daily reports
+
+  ReportPrefix:
+    Type: String
+    Default: daily
+    Description: Prefix path inside the report bucket
+
+  DDBTableName:
+    Type: String
+    Default: CostTrends
+    Description: DynamoDB table name for daily trend metrics
+
+  SnsTopicArn:
+    Type: String
+    Description: SNS topic ARN for email alerts
+
+  SlackWebhookSecretName:
+    Type: String
+    Description: Secrets Manager secret name containing Slack webhook URL or JSON {"webhook_url":"..."}
+
+  ScheduleExpression:
+    Type: String
+    Default: cron(0 9 * * ? *)
+    Description: EventBridge schedule expression (default 09:00 UTC daily)
+
+  IncludeElbCheck:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+
+  RequiredTags:
+    Type: String
+    Default: Owner,Project,Environment
+
+  AnomalyMultiplier:
+    Type: String
+    Default: "1.30"
+
+  MissingTagsAlertThreshold:
+    Type: String
+    Default: "5"
+
+  PotentialSavingsAlertThreshold:
+    Type: String
+    Default: "100.0"
+
+  MonthlyBudgetUsd:
+    Type: String
+    Default: "0.0"
+
+  BudgetAlertThresholdPct:
+    Type: String
+    Default: "80.0"
+
+  Ec2DefaultHourlyUsd:
+    Type: String
+    Default: "0.05"
+
+  EbsGp3GbMonthUsd:
+    Type: String
+    Default: "0.08"
+
+  SnapshotGbMonthUsd:
+    Type: String
+    Default: "0.05"
+
+  Ec2TypeHourlyOverrides:
+    Type: String
+    Default: ""
+    Description: Comma-separated list, e.g. m5.large:0.096,t3.micro:0.0104
+
+Resources:
+  CostTrendsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DDBTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: Date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Date
+          KeyType: HASH
+
+  CostSageDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub costsage-dlq-${AWS::StackName}
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  DashboardOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub costsage-dashboard-oac-${AWS::StackName}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  DashboardDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub CostSage dashboard distribution - ${AWS::StackName}
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: DashboardS3Origin
+            DomainName: !GetAtt DashboardBucket.RegionalDomainName
+            S3OriginConfig: {}
+            OriginAccessControlId: !GetAtt DashboardOriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: DashboardS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub arn:aws:s3:::${DashboardBucket}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${DashboardDistribution}
+
+  CostSageLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub costsage-lambda-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CostSageLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+              - Sid: CostExplorerRead
+                Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                Resource: "*"
+
+              - Sid: Ec2Read
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+                  - ec2:DescribeSnapshots
+                Resource: "*"
+
+              - Sid: ElbRead
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeTargetGroups
+                Resource: "*"
+
+              - Sid: TaggingRead
+                Effect: Allow
+                Action:
+                  - tag:GetResources
+                Resource: "*"
+
+              - Sid: CloudWatchRead
+                Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                Resource: "*"
+
+              - Sid: ReportWrite
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${ReportBucketName}/*
+
+              - Sid: ReportListBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${ReportBucketName}
+
+              - Sid: DdbWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt CostTrendsTable.Arn
+
+              - Sid: SnsPublish
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SnsTopicArn
+
+              - Sid: DlqWrite
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt CostSageDlq.Arn
+
+              - Sid: ReadSlackSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SlackWebhookSecretName}*
+
+  CostSageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub costsage-engine-${AWS::StackName}
+      CodeUri: costsage/
+      Handler: main.lambda_handler
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 900
+      Role: !GetAtt CostSageLambdaRole.Arn
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt CostSageDlq.Arn
+      Environment:
+        Variables:
+          REPORT_BUCKET: !Ref ReportBucketName
+          REPORT_PREFIX: !Ref ReportPrefix
+          DDB_TABLE: !Ref DDBTableName
+          SNS_TOPIC_ARN: !Ref SnsTopicArn
+          SLACK_WEBHOOK_SECRET_NAME: !Ref SlackWebhookSecretName
+          REQUIRED_TAGS: !Ref RequiredTags
+          ANOMALY_MULTIPLIER: !Ref AnomalyMultiplier
+          MISSING_TAGS_ALERT_THRESHOLD: !Ref MissingTagsAlertThreshold
+          POTENTIAL_SAVINGS_ALERT_THRESHOLD: !Ref PotentialSavingsAlertThreshold
+          MONTHLY_BUDGET_USD: !Ref MonthlyBudgetUsd
+          BUDGET_ALERT_THRESHOLD_PCT: !Ref BudgetAlertThresholdPct
+          INCLUDE_ELB_CHECK: !Ref IncludeElbCheck
+          EC2_DEFAULT_HOURLY_USD: !Ref Ec2DefaultHourlyUsd
+          EBS_GP3_GB_MONTH_USD: !Ref EbsGp3GbMonthUsd
+          SNAPSHOT_GB_MONTH_USD: !Ref SnapshotGbMonthUsd
+          EC2_TYPE_HOURLY_OVERRIDES: !Ref Ec2TypeHourlyOverrides
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref ScheduleExpression
+            Name: !Sub costsage-daily-${AWS::StackName}
+            Description: Daily CostSage automation trigger
+            Enabled: true
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+              MaximumEventAgeInSeconds: 3600
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub costsage-lambda-errors-${AWS::StackName}
+      AlarmDescription: CostSage Lambda errors detected
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CostSageFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SnsTopicArn
+
+  LambdaThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub costsage-lambda-throttles-${AWS::StackName}
+      AlarmDescription: CostSage Lambda throttles detected
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CostSageFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SnsTopicArn
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub costsage-lambda-duration-${AWS::StackName}
+      AlarmDescription: CostSage Lambda near-timeout execution duration
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CostSageFunction
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 840000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SnsTopicArn
+
+Outputs:
+  FunctionName:
+    Value: !Ref CostSageFunction
+
+  CostTrendsTableName:
+    Value: !Ref CostTrendsTable
+
+  DailyScheduleRule:
+    Value: !Sub costsage-daily-${AWS::StackName}
+
+  DeadLetterQueueUrl:
+    Value: !Ref CostSageDlq
+
+  DashboardBucketName:
+    Value: !Ref DashboardBucket
+
+  DashboardDistributionId:
+    Value: !Ref DashboardDistribution
+
+  DashboardDistributionDomainName:
+    Value: !GetAtt DashboardDistribution.DomainName
