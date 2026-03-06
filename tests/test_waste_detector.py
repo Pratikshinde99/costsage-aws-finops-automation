@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from costsage.waste_detector import detect_waste_resources
